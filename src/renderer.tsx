@@ -198,6 +198,9 @@ async function renderSingleMsgBox(messageBox: HTMLElement) {
   // Handle click of Copy Latex Button
   addOnClickHandleForLatexBlock(markdownBody);
 
+  // Render mermaid diagrams
+  renderMermaidBlocks(markdownBody);
+
   // Handle open external link
   handleExternalLink(markdownBody);
 
@@ -207,6 +210,10 @@ async function renderSingleMsgBox(messageBox: HTMLElement) {
 
 function _onLoad() {
   const plugin_path = LiteLoader.plugins.markdown_it.path.plugin;
+
+  const mermaidScript = document.createElement('script');
+  mermaidScript.src = `local:///${plugin_path}/src/lib/mermaid.min.js`;
+  document.head.appendChild(mermaidScript);
 
   loadCSSFromURL(`local:///${plugin_path}/src/style/markdown.css`);
   loadCSSFromURL(`local:///${plugin_path}/src/style/katex.css`);
@@ -238,6 +245,19 @@ function _onLoad() {
     }
   });
   observer.observe(document.body, { childList: true, subtree: true });
+}
+
+let mermaidCounter = 0;
+function renderMermaidBlocks(element: HTMLElement) {
+  const blocks = element.querySelectorAll<HTMLElement>('div.mdit-mermaid-block[data-mermaid]');
+  blocks.forEach((block) => {
+    const content = decodeURIComponent(block.dataset.mermaid);
+    const id = 'mermaid-' + (mermaidCounter++);
+    (window as any).mermaid?.render(id, content).then(({ svg }: { svg: string }) => {
+      block.innerHTML = svg;
+      delete block.dataset.mermaid;
+    }).catch(() => {});
+  });
 }
 
 /**
