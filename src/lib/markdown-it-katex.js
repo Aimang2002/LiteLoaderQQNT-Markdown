@@ -88,8 +88,6 @@ for rendering output.
 'use strict';
 
 var katex = require('katex');
-import React from 'react';
-import { renderToString } from 'react-dom/server';
 
 // Test if potential opening or closing delimieter
 // Assumes that there is a "$" at state.src[pos]
@@ -281,8 +279,12 @@ export default function math_plugin(md, options) {
     latex = unescapeHtml(latex); // work with QQNT Markdown-it
     options.displayMode = true;
     try {
-      // return `<p class="katex-block katex_rendered ${options.blockClass}">` + katex.renderToString(latex, options) + "</p>";
-      return renderToString(<KatexBlockComponent latex={latex} options={options} />);
+      // block math used to go through a React component and renderToString(); the markup
+      // it produced is kept as-is, only built as a string now.
+      return '<div class="katex-block-rendered">'
+        + '<button class="copy_latex">复制公式</button>'
+        + '<p class="katex-block">' + katex.renderToString(latex, options) + '</p>'
+        + '</div>';
     }
     catch (error) {
       if (options.throwOnError) { console.log(error); }
@@ -303,13 +305,3 @@ export default function math_plugin(md, options) {
   md.renderer.rules.math_inline = inlineRenderer;
   md.renderer.rules.math_block = blockRenderer;
 };
-
-
-function KatexBlockComponent({ latex, options }) {
-  return (
-    <div className='katex-block-rendered'>
-      <button className='copy_latex'>复制公式</button>
-      <p className='katex-block' dangerouslySetInnerHTML={{ __html: katex.renderToString(latex, options) }}></p>
-    </div>
-  );
-}

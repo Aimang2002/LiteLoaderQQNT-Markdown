@@ -6,19 +6,13 @@ import React from 'react';
 (React as any).createRoot = createRoot;
 import { SettingPage } from "./components/setting_page";
 
-const hljs = require('highlight.js');
-import markdownIt from 'markdown-it';
-
-
 // Components
 import {
-  HighLightedCodeBlock,
   addOnClickHandleForCopyButton,
-  renderInlineCodeBlockString,
   addOnClickHandleForLatexBlock,
   changeDirectionToColumnWhenLargerHeight
 } from './components/code_block';
-import { ShowOriginalContentButton, addShowOriginButtonToMarkdownBody } from '@/components/show_origin';
+import { addShowOriginButtonToMarkdownBody } from '@/components/show_origin';
 
 // States
 import { useSettingsStore } from '@/states/settings';
@@ -26,15 +20,15 @@ import { useSettingsStore } from '@/states/settings';
 // Utils
 import { debounce } from 'throttle-debounce';
 import { mditLogger, elementDebugLogger } from './utils/logger';
-import { MsgProcessInfo, processorList } from '@/render/msgpiece_processor';
+import { renderTextElement } from '@/render/msgpiece_processor';
 
 // Types
 import { LiteLoaderInterFace } from '@/utils/liteloader_type';
 
 declare const LiteLoader: LiteLoaderInterFace<Object>;
+const MESSAGE_BOX_CLASS = 'message-content';
 const markdownRenderedClassName = 'markdown-rendered';
-const markdownIgnoredPieceClassName = 'mdit-ignored';
-let markdownItIns: markdownIt | undefined = undefined;
+type SettingsState = ReturnType<typeof useSettingsStore.getState>;
 let mermaidReady: Promise<void> | undefined = undefined;
 
 onLoad();
@@ -45,36 +39,91 @@ onLoad();
 const debouncedRender = debounce(50, render, { atBegin: false },);
 
 /**
+ * Message boxes waiting to be rendered.
+ *
+ * The observer below only collects message boxes that were actually added to the DOM, so a
+ * render pass never has to scan the whole document again.
+ */
+const pendingMessageBoxes = new Set<HTMLElement>();
+
+/**
+ * Remember every message box contained in a newly added node.
+ *
+ * @returns `true` if this node contained at least one message box.
+ */
+function collectMessageBoxes(node: Node): boolean {
+  if (node.nodeType !== Node.ELEMENT_NODE) {
+    return false;
+  }
+
+  const element = node as HTMLElement;
+  if (element.classList.contains(MESSAGE_BOX_CLASS)) {
+    pendingMessageBoxes.add(element);
+    return true;
+  }
+
+  const nestedBoxes = element.querySelectorAll('.' + MESSAGE_BOX_CLASS);
+  if (nestedBoxes.length === 0) {
+    return false;
+  }
+
+  nestedBoxes.forEach((box) => pendingMessageBoxes.add(box as HTMLElement));
+  return true;
+}
+
+/**
+ * Check whether a mutation happened inside a message box. A message body can be inserted
+ * in several steps, so a box that showed up empty may still need to be rendered.
+ */
+function isInsideMessageBox(node: Node | null): boolean {
+  if (node === null) {
+    return false;
+  }
+  const element = node.nodeType === Node.ELEMENT_NODE ? (node as Element) : node.parentElement;
+  return element !== null && element.closest('.' + MESSAGE_BOX_CLASS) !== null;
+}
+
+/**
  * Root markdown render function.
  *
- * This function will get called once change of msgList is detected and a possible rerender is required.
+ * This function will get called once new message boxes are detected and a render is required.
  */
 function render() {
-  // return;
-  mditLogger('debug', 'renderer() triggered');
-
   const settings = useSettingsStore.getState();
 
-  const elements = document.querySelectorAll(".message-content");
+  const pendingBoxes = Array.from(pendingMessageBoxes);
+  pendingMessageBoxes.clear();
 
-  let newlyFoundMsgList = Array.from(elements)
+  let renderedAny = false;
+
+  for (let msgBox of pendingBoxes) {
+    // message box got removed from the DOM before this pass, nothing to do
+    if (!msgBox.isConnected) {
+      continue;
+    }
     // 跳过已渲染的消息
-    .filter((messageBox) => (!messageBox.classList.contains(markdownRenderedClassName)))
-    // 跳过空消息
-    .filter((messageBox) => messageBox.childNodes.length > 0);
+    if (msgBox.classList.contains(markdownRenderedClassName)) {
+      continue;
+    }
+    // 跳过空消息，但留在队列里：消息内容可能稍后才被插入
+    if (msgBox.childNodes.length === 0) {
+      pendingMessageBoxes.add(msgBox);
+      continue;
+    }
 
-  mditLogger('debug', 'Newly found message count:', newlyFoundMsgList.length);
-
-  for (let msgBox of newlyFoundMsgList) {
     try {
-      renderSingleMsgBox(msgBox as HTMLElement);
+      renderSingleMsgBox(msgBox, settings);
+      renderedAny = true;
     } catch (e) {
-      mditLogger('debug', 'Render msgbox failed', e);
+      mditLogger('error', 'Render msgbox failed', e);
     }
   }
 
-  // code that runs after renderer work finished.
-  changeDirectionToColumnWhenLargerHeight();
+  if (renderedAny) {
+    // code that runs after renderer work finished.
+    changeDirectionToColumnWhenLargerHeight();
+  }
+
   elementDebugLogger();
 }
 
@@ -95,9 +144,7 @@ function handleExternalLink(markdownBody: HTMLElement) {
   });
 }
 
-async function renderSingleMsgBox(messageBox: HTMLElement) {
-  const settings = useSettingsStore.getState();
-
+function renderSingleMsgBox(messageBox: HTMLElement, settings: SettingsState) {
   // For more info about Rendered class mark,
   // checkout: docs/dev/msg_rendering_process.md
   // skip rendered message
@@ -114,82 +161,15 @@ async function renderSingleMsgBox(messageBox: HTMLElement) {
 
   // Get all children of message box. Return if length is zero.
   const originalSpanList = Array.from(messageBox.children);
-  mditLogger('debug', 'renderSingleMsgBox', 'originalSpanList:', originalSpanList);
   if (originalSpanList.length == 0) return;
 
-  // used as pivot when we're inserting rendered elements later.
-  // const posBase = document.createElement('span')
-  // originalSpanList[0].before(posBase);
-
-  // Here using entityProcess which may finally call DOMParser().parseFromString(input, "text/html");
-  // This may introduce XSS attack vulnerability, however, we will use DOMPurify to prevent all
-  // dangerous HTML elements when rendering markdown.
-
-
-  // use fragment processors to deal with the span in messages one by one
-  // finally, we will get a list of rendered span
-  const renderedSpanInfo = originalSpanList.map((msgSpan, index) => {
-    mditLogger('debug', 'PieceProcessor', 'Original Piece:', msgSpan);
-
-    // Try to apply piece processor in order. Stop once a processor could process current msgPiece
-    for (let processor of processorList) {
-      // try get the return value of the processor
-      let renderedSpan = processor(messageBox, (msgSpan as HTMLElement), index);
-      // if processor returned a non-undefined value, use the new element
-      if (renderedSpan !== undefined) {
-        return renderedSpan;
-      }
+  // render the message fragments that need markdown, every other fragment keeps its original look
+  for (let msgSpan of originalSpanList) {
+    if (msgSpan.nodeType !== Node.ELEMENT_NODE) {
+      continue;
     }
-
-    // here means no any frag processor could handle this msgSpan, just return itself, 
-    // in other word, keep it's original looks.
-    return { original: msgSpan, rendered: msgSpan };
-
-    // if undefined, this element should be ignored and not be removed in later process.
-    // if (retInfo === undefined) {
-    //   msgPiece.classList.add(markdownIgnoredPieceClassName);
-    // }
-    // mditLogger('debug', 'PieceProcessor', 'Piece processor return:', retInfo);
-    // return retInfo;
-  });
-
-  mditLogger('debug', 'RenderedList generated, start replacing messagebox children...');
-
-  // replace the children based on rendered info
-  for (let renderedInfo of renderedSpanInfo) {
-    mditLogger('debug', 'Try to replace:', renderedInfo);
-    let originalIsChildren = originalSpanList.some((e) => e === renderedInfo.original);
-    // mditLogger('debug', 'Original element in messageBox:', originalIsChildren);
-    messageBox.replaceChild(renderedInfo.rendered, renderedInfo.original);
+    renderTextElement(msgSpan as HTMLElement, settings);
   }
-
-
-  // 渲染 markdown
-  // const marks = markPieces.filter(p => p !== undefined).map((p) => p.mark).reduce((acc, p) => acc + p, "");
-  // mditLogger('debug', 'MarkdownRender Input:', marks);
-  // let renderedHtml = renderedHtmlProcessor(await generateMarkdownIns().render(marks));
-  // mditLogger('debug', 'MarkdownRender Output:', renderedHtml);
-
-  // 移除旧元素
-  // originalSpanList
-  //   .filter((e) => messageBox.hasChildNodes())
-  //   .forEach((e) => {
-  //     // do not remove formerly ignored elements
-  //     if (e.classList.contains(markdownIgnoredPieceClassName)) {
-  //       mditLogger('debug', 'Remove Ignore Triggered:', e);
-  //       return;
-  //     }
-  //     messageBox.removeChild(e);
-  //   });
-
-  // // 将原有元素替换回内容
-  // const markdownBody = document.createElement('div');
-  // // some themes rely on this class to render
-  // markdownBody.innerHTML = `<div class="text-normal">${renderedHtml}</div>`;
-  // markPieces.filter((p) => (p?.replace !== undefined))
-  //   .forEach((p) => {
-  //     p.replace(markdownBody, p.id);
-  //   });
 
   let markdownBody = messageBox;
 
@@ -200,7 +180,7 @@ async function renderSingleMsgBox(messageBox: HTMLElement) {
   addOnClickHandleForLatexBlock(markdownBody);
 
   // Render mermaid diagrams
-  await renderMermaidBlocks(markdownBody);
+  renderMermaidBlocks(markdownBody);
 
   // Handle open external link
   handleExternalLink(markdownBody);
@@ -259,18 +239,38 @@ function _onLoad() {
   });
 
 
-  // Observe the change of message list. Once changed, trigger render() function.
+  // Observe the change of message list. Once new messages appear, trigger render() function.
+  // Only nodes that actually contain a message box are collected, so activity in unrelated
+  // parts of the UI (image viewer, panels, ...) no longer triggers a full document scan.
   const observer = new MutationObserver((mutationsList) => {
-    for (let mutation of mutationsList) {
-      if (mutation.type === "childList") {
-        // avoid error in render break users QQNT.
-        try {
-          debouncedRender();
-        } catch (e) {
-          ;
-        }
+    let foundMessageBox = false;
 
+    for (let mutation of mutationsList) {
+      if (mutation.type !== "childList") {
+        continue;
       }
+
+      for (let addedNode of Array.from(mutation.addedNodes)) {
+        if (collectMessageBoxes(addedNode)) {
+          foundMessageBox = true;
+        }
+      }
+
+      // message body may be inserted into the box in several steps
+      if (isInsideMessageBox(mutation.target)) {
+        foundMessageBox = true;
+      }
+    }
+
+    if (!foundMessageBox) {
+      return;
+    }
+
+    // avoid error in render break users QQNT.
+    try {
+      debouncedRender();
+    } catch (e) {
+      ;
     }
   });
   observer.observe(document.body, { childList: true, subtree: true });
@@ -517,12 +517,26 @@ function bindMermaidPreview(block: HTMLElement) {
   };
 }
 
-async function renderMermaidBlocks(element: HTMLElement) {
-  const blocks = element.querySelectorAll<HTMLElement>('div.mdit-mermaid-block[data-mermaid]');
+/**
+ * Mermaid renders are heavy (parse + layout + SVG) and each one runs on the main thread.
+ * Diagrams are rendered one at a time, so a message carrying several diagrams cannot
+ * saturate the main thread all at once.
+ */
+let mermaidRenderQueue: Promise<void> = Promise.resolve();
+
+function renderMermaidBlocks(element: HTMLElement) {
+  const blocks = Array.from(element.querySelectorAll<HTMLElement>('div.mdit-mermaid-block[data-mermaid]'));
   if (blocks.length === 0) {
     return;
   }
 
+  mermaidRenderQueue = mermaidRenderQueue.then(
+    () => renderMermaidBlocksQueued(blocks),
+    () => renderMermaidBlocksQueued(blocks),
+  );
+}
+
+async function renderMermaidBlocksQueued(blocks: HTMLElement[]) {
   try {
     await mermaidReady;
   } catch (e) {
@@ -533,7 +547,7 @@ async function renderMermaidBlocks(element: HTMLElement) {
     return;
   }
 
-  for (const block of Array.from(blocks)) {
+  for (const block of blocks) {
     const rawContent = decodeURIComponent(block.dataset.mermaid || '');
     const contentCandidates = buildMermaidContentCandidates(rawContent);
     const id = 'mermaid-' + (mermaidCounter++);
@@ -557,6 +571,9 @@ async function renderMermaidBlocks(element: HTMLElement) {
     if (!rendered) {
       renderMermaidFallback(block);
     }
+
+    // 让出主线程，保证连续渲染多张图时界面仍然可响应
+    await new Promise((resolve) => setTimeout(resolve, 0));
   }
 }
 

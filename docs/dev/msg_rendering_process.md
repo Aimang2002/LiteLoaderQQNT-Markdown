@@ -7,6 +7,14 @@
 - [Refs](#refs)
 
 
+> [!IMPORTANT]
+> **Updated after the 2026-09 performance rework.** The *Fragment Processor* layer described
+> below no longer exists. `src/render/msgpiece_processor.tsx` now exposes a single
+> `renderTextElement(element, settings)` function, and `render()` in `src/renderer.tsx` only
+> visits message boxes that were actually added to the DOM (the mutation observer collects
+> them from the added nodes) instead of scanning the whole document on every DOM change.
+> The sections below are kept as design history for the fragment pipeline.
+
 # Workflow
 
 Currently the plugin does NOT rendering all content inside a message box. We only deal with contents that may need go through the markdown renderer. Also, since some element should NOT be considered as Markdown when rendering and should keep what it look like throughout the rendering, we introduced the concept of **Fragment Processor** _(FragProcessor)_.
